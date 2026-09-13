@@ -1,0 +1,10 @@
+
+https://hubenka.github.io/programovanie/zbierka-uloh/premenne/7-cesta-autom/
+
+#Examples
+
+bash$ python 7.cesta-autom.py 
+Dĺžka cesty (km): 60
+Odchod z domu (hodina): 8
+Príchod do hotela (hodina): 11
+Auto pôjde priemernou rýchlosťou 20.0 km/h.
