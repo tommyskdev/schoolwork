@@ -1,0 +1,64 @@
+Ball mass --- asi ano
+
+Ball radius --- mozno 
+
+Gravity direction --- asi ano
+
+Ground friction --- mozno, mozno spojit do 1 friction spolu s wall friction
+
+Wall friction --- mozno, zalezi od ground friction
+
+Spin --- mozno
+
+Wind --- mozno
+
+Air Resistance --- mozno
+
+Gravity
+
+Bounce
+
+Funkcie:
+
+Drag: grab the ball and move it around.
+
+Release: its velocity is determined from the drag movement, so you can throw it.
+
+Quick drag/flick: acts like a kick.
+
+Click/tap: gives the ball a small impulse.
+
+Hold + release: lets the user aim a stronger throw.
+
+
+┌──────────────────────────────────────────────────────────┐
+│                                               ⚙ Settings │
+│                                                          │
+│                                                          │
+│                    ●                                     │
+│                 ↗      ↘                                 │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│──────────────────────────────────────────────────────────│
+│                                                          │
+│              [  RESET  ]   [  PAUSE  ]                   │
+│                                                          │
+│  Gravity ─────────●────────     Bounce ────────●──────   │
+│  Friction ────────●────────     Air drag ──────●──────   │
+└──────────────────────────────────────────────────────────┘
+
+Statistiky
+
+Rychlost lopty
+
+Sila uderu?
+
+
+Misc
+
+Rozne lopty???
+
+dalsie objekty???
+
