@@ -62,3 +62,13 @@ Rozne lopty???
 
 dalsie objekty???
 
+addition:
+
+word document (PDF)
+Nazov Simulacie
+Tema, autor
+1. popis - o com je simulacia
+2. prostredie - kde sa odohrava
+3. predmety/objekty - co sa tam nachadza
+4. interkativity - ako sa to ovlada, co to bude robit, 5-10 co sa da robit, ovladat
+5. nacrt
