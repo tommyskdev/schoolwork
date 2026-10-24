@@ -1,2 +1,0 @@
-prerobit tk.button na obdlzniki a event handleri
-pokracovat v UI
