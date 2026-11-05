@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import time
 import tkinter as tk
@@ -7,21 +8,18 @@ from datetime import datetime
 SAVE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loptoland_save.json")
 DEF = {
     "gravity": 9.81, "gravity_angle": 0.0, "air_density": 1.225,
-    "wind_speed": 0.0, "wind_angle": 0.0, "restitution": 0.75,
-    "ground_friction": 0.35, "wall_friction": 0.20,
+    "restitution": 0.75, "ground_friction": 0.35, "wall_friction": 0.20,
     "ball_mass": 0.43, "ball_radius": 0.30, "ball_spin": 0.0,
 }
 GROUPS = {
-    "world_physics": ("gravity", "gravity_angle", "air_density", "wind_speed", "wind_angle"),
+    "world_physics": ("gravity", "gravity_angle", "air_density"),
     "surfaces_environment": ("restitution", "ground_friction", "wall_friction"),
     "ball_defaults": ("ball_mass", "ball_radius", "ball_spin"),
 }
 WORLD = [
     ("gravity", "Gravity", "m/s²", 0, 100),
-    ("gravity_angle", "Gravity direction", "°", 0, 360),
+    ("gravity_angle", "Gravity direction (0° = down)", "°", 0, 360),
     ("air_density", "Air density (air drag) ρ", "kg/m³", 0, 20),
-    ("wind_speed", "Wind speed", "m/s", 0, 100),
-    ("wind_angle", "Wind direction", "°", 0, 360),
 ]
 SURF = [
     ("restitution", "Bounce / restitution e", "", 0, 1),
@@ -31,7 +29,9 @@ SURF = [
 INFO = ["SPEED (V)", "STRIKE FORCE (F)", "SPIN", "KINETIC ENERGY", "VECTOR (VX / VY)"]
 S = dict(DEF)
 objects, paused, status_job, popups = [], False, None, {}
-drag_obj, last_time = None, 0.0
+drag_obj, active_obj, last_time = None, None, 0.0
+drag_samples = []
+info_values = []
 
 BG, PANEL, BTN, HVR = "#11151c", "#262c37", "#2b3240", "#3d4654"
 FG, MUTED, EDGE, ACC = "#e6edf3", "#8b98a9", "#4a5666", "#5aa9e6"
@@ -40,9 +40,20 @@ ARENA, BH = (0.03, 0.05, 0.97, 0.72), 0.028
 POPUP_Y = (ARENA[1] + ARENA[3]) / 2
 SIZE = {"Balls": (18, 18), "Cube": (18, 18), "Ramp": (28, 18),
         "Bumper": (22, 22), "Wall Barrier": (40, 7)}
-PX_PER_M, REST = 100.0, 0.02  # pixels per metre, rest threshold
+PX_PER_M = 100.0
 FONT = "DejaVu Sans"
 F8, F9, FB, F14 = (FONT, 8), (FONT, 9), (FONT, 9, "bold"), (FONT, 14, "bold")
+
+STATIC_KINDS = {"Ramp", "Bumper", "Wall Barrier"}
+DRAG_CD = {"Balls": 0.47, "Cube": 1.05}
+HOLD_DELAY = 0.40
+CHARGE_TIME = 1.10
+MIN_FORCE, MAX_FORCE = 50.0, 500.0
+STRIKE_TIME = 0.02
+FLICK_SPEED = 900.0
+FLICK_BOOST = 1.45
+MAX_THROW_SPEED = 5200.0
+SLEEP_SPEED, SLEEP_TIME = 7.0, 0.55
 
 root = tk.Tk()
 root.title("LoptoLand")
@@ -96,13 +107,15 @@ def popup(key, title, rows, note):
                 msg.config(text=f"{label}: {low:g} to {high:g}", fg=RED)
                 return
         S.update(values)
-        msg.config(text="Stored. Not simulated yet.", fg=GREEN)
+        wake_all()
+        msg.config(text="Applied to the simulation.", fg=GREEN)
         set_status(f"{title} updated")
 
     def defaults():
         for k, (var, _, _, _) in entries.items():
             S[k] = DEF[k]
             var.set(f"{S[k]:g}")
+        wake_all()
         msg.config(text="Defaults restored.", fg=GREEN)
     for i, (name, label, unit, low, high) in enumerate(rows, 1):
         tk.Label(frame, text=label, bg=PANEL, fg=MUTED, font=F9).grid(
@@ -139,11 +152,13 @@ def popup(key, title, rows, note):
 
 def open_world():
     popup("world", "World Physics", WORLD,
-          "Co sem cumis, aj tak tomu nechapes")
+          "Gravity 0° points down, 90° points right. "
+          "Air density adds quadratic air drag.")
 
 def open_surfaces():
     popup("surfaces", "Surfaces & Environment", SURF,
-          "Co sem cumis, aj tak tomu nechapes")
+          "Restitution controls bounce. Friction controls loss of tangential "
+          "speed on the floor and walls.")
 
 def save_state():
     data = {
@@ -184,18 +199,400 @@ def place_obj(obj):
 def pointer():
     return root.winfo_pointerx() - canvas.winfo_rootx(), root.winfo_pointery() - canvas.winfo_rooty()
 
+def wake(obj):
+    if obj.get("static"):
+        return
+    obj["rest"] = False
+    obj["sleep_timer"] = 0.0
+
+def wake_all():
+    for obj in objects:
+        wake(obj)
+
+def body_mass(obj):
+    kind = obj["kind"]
+    if kind == "Balls":
+        return max(0.01, S["ball_mass"])
+    if kind == "Cube":
+        return 1.0
+    return float("inf")
+
+def inv_mass(obj):
+    if obj.get("static"):
+        return 0.0
+    mass = body_mass(obj)
+    return 0.0 if mass == float("inf") else 1.0 / mass
+
+def body_restitution(obj):
+    if obj["kind"] == "Bumper":
+        return 1.0
+    return S["restitution"]
+
+def body_half_extents(obj):
+    kind = obj["kind"]
+    if kind in ("Balls", "Bumper"):
+        radius = SIZE[kind][0]
+        return radius, radius
+    return SIZE[kind]
+
+def object_collider(obj, cw, ch):
+    kind = obj["kind"]
+    cx, cy = obj["x"] * cw, obj["y"] * ch
+    if kind in ("Balls", "Bumper"):
+        return ("circle", (cx, cy), SIZE[kind][0])
+    if kind == "Ramp":
+        return ("poly", [(cx - 28, cy + 18), (cx + 28, cy + 18), (cx + 28, cy - 18)])
+    hw, hh = SIZE[kind]
+    return ("poly", [(cx - hw, cy - hh), (cx + hw, cy - hh),
+                     (cx + hw, cy + hh), (cx - hw, cy + hh)])
+
+def centroid(poly):
+    return (sum(p[0] for p in poly) / len(poly),
+            sum(p[1] for p in poly) / len(poly))
+
+def point_in_polygon(x, y, poly):
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+def closest_on_segment(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    length2 = dx * dx + dy * dy
+    if length2 == 0.0:
+        return ax, ay
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length2))
+    return ax + t * dx, ay + t * dy
+
+def circle_polygon(circle, poly):
+    cx, cy, radius = circle[1][0], circle[1][1], circle[2]
+    if point_in_polygon(cx, cy, poly):
+        ccx, ccy = centroid(poly)
+        best_dist, best_normal = -float("inf"), (0.0, -1.0)
+        for i in range(len(poly)):
+            ax, ay = poly[i]
+            bx, by = poly[(i + 1) % len(poly)]
+            ex, ey = bx - ax, by - ay
+            nx, ny = ey, -ex
+            length = math.hypot(nx, ny)
+            if length == 0.0:
+                continue
+            nx, ny = nx / length, ny / length
+            mx, my = (ax + bx) / 2, (ay + by) / 2
+            if (mx - ccx) * nx + (my - ccy) * ny < 0:
+                nx, ny = -nx, -ny
+            dist = (cx - ax) * nx + (cy - ay) * ny
+            if dist > best_dist:
+                best_dist, best_normal = dist, (nx, ny)
+        nx, ny = best_normal
+        return (-nx, -ny), radius - best_dist
+    best_dist = float("inf")
+    best_point = (cx, cy)
+    best_normal = (0.0, -1.0)
+    for i in range(len(poly)):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % len(poly)]
+        qx, qy = closest_on_segment(cx, cy, ax, ay, bx, by)
+        dist = math.hypot(qx - cx, qy - cy)
+        if dist < best_dist:
+            best_dist = dist
+            best_point = (qx, qy)
+    if best_dist > radius:
+        return None
+    dx, dy = best_point[0] - cx, best_point[1] - cy
+    if best_dist < 1e-9:
+        ccx, ccy = centroid(poly)
+        dx, dy = cx - ccx, cy - ccy
+        length = math.hypot(dx, dy) or 1.0
+        best_normal = (-dx / length, -dy / length)
+    else:
+        best_normal = (dx / best_dist, dy / best_dist)
+    return best_normal, radius - best_dist
+
+def project_polygon(poly, nx, ny):
+    values = [x * nx + y * ny for x, y in poly]
+    return min(values), max(values)
+
+def polygon_polygon(poly_a, poly_b):
+    axes = []
+    for poly in (poly_a, poly_b):
+        for i in range(len(poly)):
+            ax, ay = poly[i]
+            bx, by = poly[(i + 1) % len(poly)]
+            nx, ny = -(by - ay), bx - ax
+            length = math.hypot(nx, ny)
+            if length:
+                axes.append((nx / length, ny / length))
+    best_overlap, best_axis = float("inf"), None
+    for nx, ny in axes:
+        amin, amax = project_polygon(poly_a, nx, ny)
+        bmin, bmax = project_polygon(poly_b, nx, ny)
+        overlap = min(amax, bmax) - max(amin, bmin)
+        if overlap <= 0.0:
+            return None
+        if overlap < best_overlap:
+            best_overlap, best_axis = overlap, (nx, ny)
+    cax, cay = centroid(poly_a)
+    cbx, cby = centroid(poly_b)
+    nx, ny = best_axis
+    if (cbx - cax) * nx + (cby - cay) * ny < 0:
+        nx, ny = -nx, -ny
+    return (nx, ny), best_overlap
+
+def collide_shapes(shape_a, shape_b):
+    if shape_a[0] == "circle" and shape_b[0] == "circle":
+        ax, ay, ar = shape_a[1][0], shape_a[1][1], shape_a[2]
+        bx, by, br = shape_b[1][0], shape_b[1][1], shape_b[2]
+        dx, dy = bx - ax, by - ay
+        dist = math.hypot(dx, dy)
+        total = ar + br
+        if dist >= total:
+            return None
+        if dist < 1e-9:
+            return (0.0, -1.0), total
+        return (dx / dist, dy / dist), total - dist
+    if shape_a[0] == "circle":
+        return circle_polygon(shape_a, shape_b[1])
+    if shape_b[0] == "circle":
+        hit = circle_polygon(shape_b, shape_a[1])
+        if hit is None:
+            return None
+        (nx, ny), penetration = hit
+        return (-nx, -ny), penetration
+    return polygon_polygon(shape_a[1], shape_b[1])
+
+def resolve_pair(obj_a, obj_b, normal, penetration, cw, ch):
+    inv_a, inv_b = inv_mass(obj_a), inv_mass(obj_b)
+    total_inv = inv_a + inv_b
+    if total_inv == 0.0:
+        return
+    nx, ny = normal
+    correction = max(0.0, penetration - 0.5) * 0.85
+    obj_a["x"] -= nx * correction * (inv_a / total_inv) / cw
+    obj_a["y"] -= ny * correction * (inv_a / total_inv) / ch
+    obj_b["x"] += nx * correction * (inv_b / total_inv) / cw
+    obj_b["y"] += ny * correction * (inv_b / total_inv) / ch
+
+    rvx = obj_b["vx"] - obj_a["vx"]
+    rvy = obj_b["vy"] - obj_a["vy"]
+    vn = rvx * nx + rvy * ny
+    if vn >= 0.0:
+        return
+    bounce = max(body_restitution(obj_a), body_restitution(obj_b))
+    impulse = -(1.0 + bounce) * vn / total_inv
+    obj_a["vx"] -= impulse * nx * inv_a
+    obj_a["vy"] -= impulse * ny * inv_a
+    obj_b["vx"] += impulse * nx * inv_b
+    obj_b["vy"] += impulse * ny * inv_b
+
+    tx, ty = rvx - vn * nx, rvy - vn * ny
+    tangent = math.hypot(tx, ty)
+    if tangent > 1e-6:
+        tx, ty = tx / tangent, ty / tangent
+        friction_impulse = -(rvx * tx + rvy * ty) / total_inv
+        limit = 0.15 * abs(impulse)
+        friction_impulse = max(-limit, min(limit, friction_impulse))
+        obj_a["vx"] -= friction_impulse * tx * inv_a
+        obj_a["vy"] -= friction_impulse * ty * inv_a
+        obj_b["vx"] += friction_impulse * tx * inv_b
+        obj_b["vy"] += friction_impulse * ty * inv_b
+
+def apply_environment(obj, dt):
+    kind = obj["kind"]
+    if kind not in ("Balls", "Cube"):
+        return
+    mass = body_mass(obj)
+    if kind == "Balls":
+        radius = max(0.01, S["ball_radius"])
+        area = math.pi * radius * radius
+    else:
+        hw, hh = SIZE["Cube"]
+        area = (2 * hw / PX_PER_M) * (2 * hh / PX_PER_M)
+    speed = math.hypot(obj["vx"], obj["vy"]) / PX_PER_M
+    if speed < 1e-6:
+        return
+    factor = 0.5 * S["air_density"] * DRAG_CD[kind] * area * speed / mass
+    obj["vx"] -= factor * obj["vx"] * dt
+    obj["vy"] -= factor * obj["vy"] * dt
+
+def collide_arena(obj, cw, ch, dt):
+    if obj.get("static"):
+        return
+    ax1, ay1, ax2, ay2 = ARENA
+    hw, hh = body_half_extents(obj)
+    x, y = obj["x"] * cw, obj["y"] * ch
+    left, right = ax1 * cw + hw, ax2 * cw - hw
+    top, bottom = ay1 * ch + hh, ay2 * ch - hh
+    bounce = S["restitution"]
+    if x < left:
+        x = left
+        if obj["vx"] < 0:
+            obj["vx"] = -obj["vx"] * bounce
+            obj["vy"] *= max(0.0, 1.0 - S["wall_friction"])
+    elif x > right:
+        x = right
+        if obj["vx"] > 0:
+            obj["vx"] = -obj["vx"] * bounce
+            obj["vy"] *= max(0.0, 1.0 - S["wall_friction"])
+    if y < top:
+        y = top
+        if obj["vy"] < 0:
+            obj["vy"] = -obj["vy"] * bounce
+            obj["vx"] *= max(0.0, 1.0 - S["wall_friction"])
+    elif y > bottom:
+        y = bottom
+        if obj["vy"] > 0:
+            obj["vy"] = -obj["vy"] * bounce
+            if abs(obj["vy"]) < SLEEP_SPEED:
+                obj["vy"] = 0.0
+        obj["vx"] *= max(0.0, 1.0 - S["ground_friction"] * 5.0 * dt)
+    obj["x"], obj["y"] = x / cw, y / ch
+
+def physics(dt):
+    cw, ch = canvas.winfo_width(), canvas.winfo_height()
+    gravity = S["gravity"] * PX_PER_M
+    angle = math.radians(S["gravity_angle"])
+    gravity_x, gravity_y = gravity * math.sin(angle), gravity * math.cos(angle)
+    steps = max(1, min(20, int(math.ceil(dt / 0.003))))
+    step = dt / steps
+    for _ in range(steps):
+        for obj in objects:
+            if obj.get("static") or obj["drag"] or obj["rest"]:
+                continue
+            obj["vx"] += gravity_x * step
+            obj["vy"] += gravity_y * step
+            apply_environment(obj, step)
+            obj["x"] += obj["vx"] * step / cw
+            obj["y"] += obj["vy"] * step / ch
+        for obj in objects:
+            if obj["drag"] or obj["rest"]:
+                continue
+            collide_arena(obj, cw, ch, step)
+        solids = [(obj, object_collider(obj, cw, ch)) for obj in objects if not obj["drag"]]
+        for i, (obj_a, shape_a) in enumerate(solids):
+            moving_a = not obj_a.get("static") and not obj_a["rest"]
+            for j in range(i + 1, len(solids)):
+                obj_b, shape_b = solids[j]
+                if obj_a.get("static") and obj_b.get("static"):
+                    continue
+                moving_b = not obj_b.get("static") and not obj_b["rest"]
+                if not moving_a and not moving_b:
+                    continue
+                if obj_a["rest"] and moving_b:
+                    wake(obj_a)
+                if obj_b["rest"] and moving_a:
+                    wake(obj_b)
+                hit = collide_shapes(shape_a, shape_b)
+                if hit is not None:
+                    resolve_pair(obj_a, obj_b, hit[0], hit[1], cw, ch)
+        for obj in objects:
+            if obj["drag"] or obj["rest"]:
+                continue
+            collide_arena(obj, cw, ch, 0.0)
+        for obj in objects:
+            if obj.get("static") or obj["drag"] or obj["rest"]:
+                continue
+            if math.hypot(obj["vx"], obj["vy"]) < SLEEP_SPEED:
+                obj["sleep_timer"] += step
+                if obj["sleep_timer"] >= SLEEP_TIME:
+                    obj["vx"] = obj["vy"] = 0.0
+                    obj["rest"] = True
+            else:
+                obj["sleep_timer"] = 0.0
+
+def sync_positions():
+    for obj in objects:
+        place_obj(obj)
+
+def update_drag_state():
+    obj = drag_obj
+    if obj is None or obj.get("static") or obj.get("aiming"):
+        return
+    now = time.perf_counter()
+    if now - obj["grab_time"] < HOLD_DELAY:
+        return
+    px, py = pointer()
+    gx, gy = obj["grab_px"]
+    if math.hypot(px - gx, py - gy) <= 12:
+        obj["aiming"] = True
+        obj["charge_start"] = now
+        obj["charge"] = 0.0
+        set_status("Power throw: aim with the mouse, release to strike")
+
+def update_aim():
+    canvas.delete("aim")
+    obj = drag_obj
+    if obj is None or not obj.get("aiming"):
+        return
+    now = time.perf_counter()
+    charge = min(1.0, max(0.0, (now - obj["charge_start"]) / CHARGE_TIME))
+    obj["charge"] = charge
+    cw, ch = canvas.winfo_width(), canvas.winfo_height()
+    cx, cy = obj["x"] * cw, obj["y"] * ch
+    px, py = pointer()
+    dx, dy = px - cx, py - cy
+    distance = math.hypot(dx, dy)
+    if distance > 10:
+        obj["aim_dir"] = (dx / distance, dy / distance)
+    ax, ay = obj["aim_dir"]
+    length = 50 + 220 * charge
+    tip_x, tip_y = cx + ax * length, cy + ay * length
+    force = MIN_FORCE + (MAX_FORCE - MIN_FORCE) * charge
+    canvas.create_line(cx, cy, tip_x, tip_y, arrow="last", arrowshape=(14, 18, 7),
+                       fill=GOLD, width=4, tags="aim")
+    canvas.create_text(tip_x + ax * 26, tip_y + ay * 26,
+                       text=f"{force:.0f} N", fill=GOLD, font=FB, tags="aim")
+
+def update_telemetry():
+    obj = active_obj
+    if obj not in objects:
+        obj = None
+    if obj is None:
+        values = ["—"] * len(INFO)
+    else:
+        speed = math.hypot(obj["vx"], obj["vy"]) / PX_PER_M
+        mass = body_mass(obj)
+        energy = 0.5 * mass * speed * speed if mass != float("inf") else 0.0
+        values = [
+            f"{speed:.1f} m/s",
+            f"{obj.get('last_force', 0.0):.1f} N",
+            f"{obj.get('spin', 0.0):.1f} rad/s",
+            f"{energy:.1f} J",
+            f"{obj['vx'] / PX_PER_M:+.1f} / {obj['vy'] / PX_PER_M:+.1f} m/s",
+        ]
+    for label, value in zip(info_values, values):
+        label.config(text=value)
+
 def begin_drag(obj):
-    global drag_obj
+    global drag_obj, active_obj, drag_samples
     obj["drag"], obj["rest"] = True, False
+    obj["sleep_timer"] = 0.0
     obj["vx"] = obj["vy"] = 0.0
+    obj["aiming"] = False
+    obj["charge"] = 0.0
+    obj["grab_time"] = time.perf_counter()
+    obj["grab_px"] = pointer()
+    obj["aim_dir"] = (0.0, -1.0)
+    obj.setdefault("static", obj["kind"] in STATIC_KINDS)
+    obj.setdefault("last_force", 0.0)
+    obj.setdefault("spin", 0.0)
     drag_obj = obj
+    active_obj = obj
+    drag_samples = [(obj["grab_time"],) + obj["grab_px"]]
     canvas.tag_raise(obj["id"])
 
 def spawn_at_cursor(kind):
     px, py = pointer()
     cw, ch = canvas.winfo_width(), canvas.winfo_height()
     obj = {"kind": kind, "x": px / cw, "y": py / ch, "vx": 0.0, "vy": 0.0,
-           "drag": True, "rest": False, "new": True}
+           "drag": True, "rest": False, "new": True,
+           "static": kind in STATIC_KINDS, "sleep_timer": 0.0,
+           "last_force": 0.0, "spin": 0.0}
     obj["id"] = draw_obj(kind, px, py)
     objects.append(obj)
     begin_drag(obj)
@@ -209,20 +606,69 @@ def grab(event):
             return
 
 def drag(event=None):
+    global drag_samples
     if drag_obj is None:
         return
     px, py = pointer()
+    now = time.perf_counter()
+    drag_samples.append((now, px, py))
+    del drag_samples[:-25]
+    if drag_obj.get("aiming"):
+        return
     cw, ch = canvas.winfo_width(), canvas.winfo_height()
     drag_obj["x"], drag_obj["y"] = px / cw, py / ch
     place_obj(drag_obj)
 
 def drop(event=None):
-    global drag_obj
+    global drag_obj, active_obj, drag_samples
     obj = drag_obj
     if obj is None:
         return
+    now = time.perf_counter()
+    px, py = pointer()
+    aiming = obj.get("aiming", False)
     drag_obj = None
     obj["drag"] = False
+    obj["aiming"] = False
+    status = f"Placed {obj['kind']}"
+    if obj.get("static"):
+        obj["vx"] = obj["vy"] = 0.0
+    elif aiming:
+        charge = obj.get("charge", 0.0)
+        force = MIN_FORCE + (MAX_FORCE - MIN_FORCE) * charge
+        dx, dy = obj.get("aim_dir", (0.0, -1.0))
+        speed = min(MAX_THROW_SPEED, force * STRIKE_TIME / body_mass(obj) * PX_PER_M)
+        obj["vx"], obj["vy"] = dx * speed, dy * speed
+        obj["last_force"] = force
+        obj["spin"] = S["ball_spin"] if obj["kind"] == "Balls" else 0.0
+        status = f"Power throw {force:.0f} N"
+    else:
+        drag_samples.append((now, px, py))
+        cutoff = now - 0.12
+        recent = [sample for sample in drag_samples if sample[0] >= cutoff]
+        vx = vy = 0.0
+        if len(recent) >= 2:
+            t0, x0, y0 = recent[0]
+            t1, x1, y1 = recent[-1]
+            elapsed = t1 - t0
+            if elapsed > 1e-4:
+                vx, vy = (x1 - x0) / elapsed, (y1 - y0) / elapsed
+        speed = math.hypot(vx, vy)
+        flick = speed > FLICK_SPEED
+        if flick:
+            vx, vy, speed = vx * FLICK_BOOST, vy * FLICK_BOOST, speed * FLICK_BOOST
+        if speed > MAX_THROW_SPEED:
+            scale = MAX_THROW_SPEED / speed
+            vx, vy, speed = vx * scale, vy * scale, MAX_THROW_SPEED
+        obj["vx"], obj["vy"] = vx, vy
+        obj["last_force"] = body_mass(obj) * speed / PX_PER_M / STRIKE_TIME if speed else 0.0
+        if flick:
+            obj["spin"] = S["ball_spin"] if obj["kind"] == "Balls" else 0.0
+            status = f"Flick kick {speed / PX_PER_M:.1f} m/s"
+        elif speed > 0:
+            status = f"Threw {obj['kind']} at {speed / PX_PER_M:.1f} m/s"
+    obj["rest"] = False
+    obj["sleep_timer"] = 0.0
     ax1, ay1, ax2, ay2 = ARENA
     inside = ax1 <= obj["x"] <= ax2 and ay1 <= obj["y"] <= ay2
     if not inside:
@@ -230,57 +676,26 @@ def drop(event=None):
             canvas.delete(obj["id"])
             objects.remove(obj)
             return
-        obj["x"] = min(max(obj["x"], ax1), ax2)
-        obj["y"] = min(max(obj["y"], ay1), ay2)
-    obj["new"] = False
-    place_obj(obj)
-    set_status(f"Placed {obj['kind']}")
-
-def physics(dt):
+    hw, hh = body_half_extents(obj)
     cw, ch = canvas.winfo_width(), canvas.winfo_height()
-    ax1, ay1, ax2, ay2 = ARENA
-    gravity = S["gravity"] * PX_PER_M / ch
-    bounce = S["restitution"]
-    for obj in objects:
-        if obj["drag"] or obj["rest"]:
-            continue
-        kind = obj["kind"]
-        hw, hh = SIZE[kind][0] / cw, SIZE[kind][1] / ch
-        left, right, top, bottom = ax1 + hw, ax2 - hw, ay1 + hh, ay2 - hh
-        obj["vy"] += gravity * dt
-        obj["x"] += obj["vx"] * dt
-        obj["y"] += obj["vy"] * dt
-        if obj["x"] < left:
-            obj["x"] = left
-            if obj["vx"] < 0:
-                obj["vx"] = -obj["vx"] * bounce
-                obj["vy"] *= 1.0 - S["wall_friction"]
-        elif obj["x"] > right:
-            obj["x"] = right
-            if obj["vx"] > 0:
-                obj["vx"] = -obj["vx"] * bounce
-                obj["vy"] *= 1.0 - S["wall_friction"]
-        if obj["y"] < top:
-            obj["y"] = top
-            if obj["vy"] < 0:
-                obj["vy"] = -obj["vy"] * bounce
-        if obj["y"] >= bottom:
-            obj["y"] = bottom
-            if obj["vy"] > 0:
-                obj["vy"] = -obj["vy"] * bounce
-            obj["vx"] *= max(0.0, 1.0 - S["ground_friction"] * 5.0 * dt)
-            if abs(obj["vy"]) < REST and abs(obj["vx"]) < REST:
-                obj["vx"] = obj["vy"] = 0.0
-                obj["rest"] = True
-        place_obj(obj)
+    obj["x"] = min(max(obj["x"], ax1 + hw / cw), ax2 - hw / cw)
+    obj["y"] = min(max(obj["y"], ay1 + hh / ch), ay2 - hh / ch)
+    obj["new"] = False
+    active_obj = obj
+    place_obj(obj)
+    set_status(status)
 
 def tick():
     global last_time
     now = time.perf_counter()
     dt = min(now - last_time, 0.05)
     last_time = now
-    if not paused and any(not o["drag"] and not o["rest"] for o in objects):
+    update_drag_state()
+    if not paused and any(not o.get("static") and not o["drag"] and not o["rest"] for o in objects):
         physics(dt)
+        sync_positions()
+    update_aim()
+    update_telemetry()
     root.after(16, tick)
 
 def redraw(event=None):
@@ -303,12 +718,14 @@ def toggle_pause():
     set_status("Paused" if paused else "Resumed")
 
 def reset():
-    global paused, drag_obj
+    global paused, drag_obj, active_obj, drag_samples
     objects.clear()
-    drag_obj = None
+    drag_obj = active_obj = None
+    drag_samples = []
     paused = False
     pause_btn.config(text="PAUSE")
     badge_lbl.config(text="")
+    canvas.delete("aim")
     close_all()
     set_status("Simulation reset")
     redraw()
@@ -341,6 +758,9 @@ mk_spawn_button("Wall Barrier", 0.80, 0.945, 0.13)
 
 for i, text in enumerate(INFO):
     tk.Label(root, text=text, bg=PANEL, fg=MUTED, font=FB, anchor="w").place(relx=0.02 + i * 0.19, rely=0.87, anchor="w")
+    value_lbl = tk.Label(root, text="—", bg=PANEL, fg=FG, font=FB, anchor="w")
+    value_lbl.place(relx=0.02 + i * 0.19, rely=0.905, anchor="w")
+    info_values.append(value_lbl)
 tk.Label(root, text="SPAWN OBJECTS:", bg=PANEL, fg=FG, font=FB, anchor="w").place(relx=0.02, rely=0.945, anchor="w")
 status_lbl = tk.Label(root, text="", bg=BG, fg=GOLD, font=FB, anchor="e")
 status_lbl.place(relx=0.965, rely=0.068, anchor="e")

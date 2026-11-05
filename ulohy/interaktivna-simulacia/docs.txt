@@ -1,0 +1,10 @@
+vx, vy rychlosti v pixeloch
+rychlost ratana z pixelov na metre PX_PER_M
+x, y rel, kolizia prepocitava na abs px, py
+ramp, bumper, barrier nemaju gravitaciu
+na zaciatku nove variabilky, vela stastia
+objekty maju nove parametre
+gravitacna akceleracia: px, py = g (gravitacia) * sin alebo cos
+po novom re-render je kazde 0.003s - kvoli koliziam
+hod, flick atd je pocitany rychlostou kurzora v pxza poslednych 0.12s (vars)
+telemetria - activ_obj posledny interagovany objekt
