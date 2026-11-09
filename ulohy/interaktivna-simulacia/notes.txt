@@ -2,4 +2,5 @@ fyzika lopticky, odraz od steny, gravitacia atd.
 drag and drop lopticky
 	--------- pridane :) 
 let lopticky v smere nie len dole
-	--------- daco spravene 
+	--------- daco spravene
+veci na prezentaciu, load from save

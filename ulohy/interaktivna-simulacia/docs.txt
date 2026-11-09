@@ -8,3 +8,4 @@ gravitacna akceleracia: px, py = g (gravitacia) * sin alebo cos
 po novom re-render je kazde 0.003s - kvoli koliziam
 hod, flick atd je pocitany rychlostou kurzora v pxza poslednych 0.12s (vars)
 telemetria - activ_obj posledny interagovany objekt
+pridany jednoduchy load/save do jsonu

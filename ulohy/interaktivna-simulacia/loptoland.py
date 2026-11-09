@@ -152,19 +152,39 @@ def popup(key, title, rows, note):
 
 def open_world():
     popup("world", "World Physics", WORLD,
-          "Gravity 0° points down, 90° points right. "
-          "Air density adds quadratic air drag.")
+          "zbytocne sem pozeras, aj tak ti to nepomoze.")
 
 def open_surfaces():
     popup("surfaces", "Surfaces & Environment", SURF,
-          "Restitution controls bounce. Friction controls loss of tangential "
-          "speed on the floor and walls.")
+          "co tu hladas, aj tak tomu nerozumies")
+
+def safe_float(value, default=0.0):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+def snapshot_object(obj):
+    return {
+        "kind": obj["kind"],
+        "x": safe_float(obj["x"]),
+        "y": safe_float(obj["y"]),
+        "vx": safe_float(obj["vx"]),
+        "vy": safe_float(obj["vy"]),
+        "spin": safe_float(obj.get("spin", 0.0)),
+        "last_force": safe_float(obj.get("last_force", 0.0)),
+        "static": obj["kind"] in STATIC_KINDS,
+        "rest": bool(obj.get("rest", False)),
+        "sleep_timer": safe_float(obj.get("sleep_timer", 0.0)),
+    }
 
 def save_state():
     data = {
-        "format": "loptoland-save", "version": 1,
+        "format": "loptoland-save", "version": 2,
         "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         **{group: {name: S[name] for name in names} for group, names in GROUPS.items()},
+        "objects": [snapshot_object(obj) for obj in objects],
     }
     try:
         with open(SAVE, "w", encoding="utf-8") as file:
@@ -172,7 +192,79 @@ def save_state():
     except OSError as error:
         set_status(f"Save failed: {error}")
         return
-    set_status(f"Saved to {os.path.basename(SAVE)}")
+    set_status(f"Saved {len(objects)} object(s) to {os.path.basename(SAVE)}")
+
+def load_state():
+    global paused, drag_obj, active_obj, drag_samples, last_time
+    try:
+        with open(SAVE, encoding="utf-8") as file:
+            data = json.load(file)
+    except FileNotFoundError:
+        set_status(f"No save file ({os.path.basename(SAVE)})")
+        return
+    except (OSError, ValueError) as error:
+        set_status(f"Load failed: {error}")
+        return
+    if not isinstance(data, dict) or data.get("format") != "loptoland-save":
+        set_status("Load failed: not a LoptoLand save")
+        return
+    bounds = {name: (low, high) for name, _label, _unit, low, high in WORLD + SURF}
+    for group, names in GROUPS.items():
+        saved = data.get(group)
+        if not isinstance(saved, dict):
+            continue
+        for name in names:
+            if name not in saved:
+                continue
+            value = safe_float(saved[name], DEF[name])
+            if name in bounds:
+                low, high = bounds[name]
+                value = max(low, min(high, value))
+            elif name in ("ball_mass", "ball_radius"):
+                value = max(0.01, value)
+            S[name] = value
+    raw_objects = data.get("objects")
+    if not isinstance(raw_objects, list):
+        raw_objects = []
+    cw, ch = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
+    ax1, ay1, ax2, ay2 = ARENA
+    loaded = []
+    for raw in raw_objects:
+        if not isinstance(raw, dict) or raw.get("kind") not in SIZE:
+            continue
+        kind = raw["kind"]
+        hw, hh = SIZE[kind]
+        x = safe_float(raw.get("x"), (ax1 + ax2) / 2)
+        y = safe_float(raw.get("y"), (ay1 + ay2) / 2)
+        x = min(max(x, ax1 + hw / cw), ax2 - hw / cw)
+        y = min(max(y, ay1 + hh / ch), ay2 - hh / ch)
+        vx = safe_float(raw.get("vx"))
+        vy = safe_float(raw.get("vy"))
+        speed = math.hypot(vx, vy)
+        if speed > MAX_THROW_SPEED:
+            vx, vy = vx * MAX_THROW_SPEED / speed, vy * MAX_THROW_SPEED / speed
+        static = kind in STATIC_KINDS
+        loaded.append({
+            "kind": kind, "x": x, "y": y, "vx": vx, "vy": vy,
+            "drag": False, "rest": False if static else bool(raw.get("rest", False)),
+            "new": False, "static": static,
+            "sleep_timer": max(0.0, safe_float(raw.get("sleep_timer"))),
+            "last_force": max(0.0, safe_float(raw.get("last_force"))),
+            "spin": safe_float(raw.get("spin")),
+            "aiming": False, "charge": 0.0,
+        })
+    objects.clear()
+    objects.extend(loaded)
+    drag_obj = active_obj = None
+    drag_samples = []
+    paused = False
+    pause_btn.config(text="PAUSE")
+    badge_lbl.config(text="")
+    canvas.delete("aim")
+    close_all()
+    redraw()
+    last_time = time.perf_counter()
+    set_status(f"Loaded {len(objects)} object(s) from {os.path.basename(SAVE)}")
 
 def shape(kind, x, y):
     if kind == "Ramp":
@@ -522,7 +614,7 @@ def update_drag_state():
         obj["aiming"] = True
         obj["charge_start"] = now
         obj["charge"] = 0.0
-        set_status("Power throw: aim with the mouse, release to strike")
+        set_status("Power throw: aim with the mouse, release to throw")
 
 def update_aim():
     canvas.delete("aim")
@@ -747,7 +839,8 @@ def mk_spawn_button(kind, x, y, width):
 pause_btn = mk_button("PAUSE", toggle_pause, 0.02, 0.80, 0.07)
 mk_button("RESET", reset, 0.10, 0.80, 0.07)
 mk_button("SAVE", save_state, 0.18, 0.80, 0.07)
-mk_button("EXIT", root.destroy, 0.26, 0.80, 0.07)
+mk_button("LOAD", load_state, 0.26, 0.80, 0.07)
+mk_button("EXIT", root.destroy, 0.34, 0.80, 0.07)
 mk_button("World Physics", open_world, 0.52, 0.80, 0.14)
 mk_button("Surfaces & Environment", open_surfaces, 0.71, 0.80, 0.21)
 mk_spawn_button("Balls", 0.16, 0.945, 0.08)
@@ -772,6 +865,8 @@ canvas.bind("<ButtonPress-1>", grab)
 root.bind("<B1-Motion>", drag)
 root.bind("<ButtonRelease-1>", drop)
 root.bind("<Escape>", lambda _e: close_all())
+root.bind("<Control-s>", lambda _e: save_state())
+root.bind("<Control-o>", lambda _e: load_state())
 
 if __name__ == "__main__":
     last_time = time.perf_counter()
