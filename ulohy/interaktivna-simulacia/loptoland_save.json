@@ -1,0 +1,70 @@
+{
+  "format": "loptoland-save",
+  "version": 2,
+  "saved_at": "2026-11-23T20:13:55+01:00",
+  "world_physics": {
+    "gravity": 9.81,
+    "gravity_angle": 0.0,
+    "air_density": 1.225
+  },
+  "surfaces_environment": {
+    "restitution": 0.75,
+    "ground_friction": 0.35,
+    "wall_friction": 0.2
+  },
+  "ball_defaults": {
+    "ball_mass": 0.43,
+    "ball_radius": 0.3,
+    "ball_spin": 0.0
+  },
+  "objects": [
+    {
+      "kind": "Ramp",
+      "x": 0.22,
+      "y": 0.665,
+      "vx": 0.0,
+      "vy": 0.0,
+      "spin": 0.0,
+      "last_force": 0.0,
+      "static": true,
+      "rest": false,
+      "sleep_timer": 0.0
+    },
+    {
+      "kind": "Cube",
+      "x": 0.44,
+      "y": 0.705,
+      "vx": 0.0,
+      "vy": 0.0,
+      "spin": 0.0,
+      "last_force": 0.0,
+      "static": false,
+      "rest": false,
+      "sleep_timer": 0.0
+    },
+    {
+      "kind": "Bumper",
+      "x": 0.66,
+      "y": 0.684,
+      "vx": 0.0,
+      "vy": 0.0,
+      "spin": 0.0,
+      "last_force": 0.0,
+      "static": true,
+      "rest": false,
+      "sleep_timer": 0.0
+    },
+    {
+      "kind": "Balls",
+      "x": 0.36,
+      "y": 0.4,
+      "vx": -480.0,
+      "vy": -380.0,
+      "spin": 12.0,
+      "last_force": 205.0,
+      "static": false,
+      "rest": false,
+      "sleep_timer": 0.0
+    }
+  ]
+}

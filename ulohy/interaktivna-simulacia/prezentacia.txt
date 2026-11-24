@@ -1,0 +1,14 @@
+uvod a "biznis" cast - 8b
+	prezentacia programu
+	ukazka programu (ako funguje, co robi atd)
+	"bizniskejs"
+	5W
+	versioning a testovacie skupiny
+	live demo
+technicka cast - 10b
+	pouzite funkcie
+	fungovanie programu
+	checklist ze sa pouzivaju
+		premmene, podmienky, cykly a tkinter a retazec/zoznam/subor
+	vysvetlit niektoru z funkcie programov
+prezentacia, dalsie otazky atd - 2b
